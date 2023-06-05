@@ -1,17 +1,19 @@
 package ch.nyancat;
 
 import com.github.kevinsawicki.http.HttpRequest;
-import com.itextpdf.text.BadElementException;
-import com.itextpdf.text.Document;
-import com.itextpdf.text.DocumentException;
-import com.itextpdf.text.Rectangle;
+import com.itextpdf.text.*;
+import com.itextpdf.text.pdf.ColumnText;
+import com.itextpdf.text.pdf.PdfContentByte;
+import com.itextpdf.text.pdf.PdfTemplate;
 import com.itextpdf.text.pdf.PdfWriter;
 import org.apache.commons.cli.*;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.*;
+import java.nio.file.Files;
 
 public class Main {
     public static void main(String[] args) {
@@ -36,6 +38,8 @@ public class Main {
         options.addOption(temps);
         Option qualityMultiplicator = new Option("qm", "qualitymultiplicator", true, "The multiplicator to increase the image quality. The 1x resolution is 538px*737px and the default multiplicator is 2x");
         options.addOption(qualityMultiplicator);
+        Option textEnabledOption = new Option("te", "textenabled", false, "Use this if you want to copy text out of the pdf file");
+        options.addOption(textEnabledOption);
 
         HelpFormatter helper = new HelpFormatter();
         CommandLineParser parser = new DefaultParser();
@@ -44,7 +48,7 @@ public class Main {
             cmd = parser.parse(options, args);
         } catch (ParseException e) {
             System.out.println(e.getMessage());
-            helper.printHelp("Cornelsen2Pdf.jar [-u url] [-pt pspdfkittoken] [-it imagetoken] [-v versionheader] [-o output] [-r resume] [-t temps] [-qm qualitymultiplicator]", options);
+            helper.printHelp("Cornelsen2Pdf.jar [-u url] [-pt pspdfkittoken] [-it imagetoken] [-v versionheader] [-o output] [-r resume] [-t temps] [-qm qualitymultiplicator] [-te textenabled]", options);
             System.exit(0);
         }
         String baseURL = cmd.getOptionValue("u");
@@ -71,16 +75,36 @@ public class Main {
         int offset = 0;
         if (cmd.hasOption("r")) {
             System.out.println("Trying to resume download...");
-            offset = getDownloadedSites(output, pages);
+            offset = getDownloadedPages(output, pages);
         }
         downloadImages(offset, pages, output, imageTokenString, baseURL, qm);
+        System.out.println("Downloading text...");
+        downloadText(offset, pages, output, pspdfkittokenString, baseURL);
         System.out.println("Download finished. Merging images into one pdf...");
-        imagesToPdf(output, pages, "output");
+        imagesToPdf(output, pages, "output", qm, cmd.hasOption("te"));
         if (!cmd.hasOption("t")) {
             System.out.println("Cleaning up...");
             cleanup(output, pages);
         }
         System.out.println("Done!");
+    }
+
+    public static void downloadText(int offset, int pagesToDownload, String output, String pspdfkitToken, String baseUrl) {
+        for (int currentPage = offset; currentPage < pagesToDownload; currentPage++) {
+            File file = new File(output + "page" + currentPage + "text.json");
+            String jsonString = HttpRequest.get(baseUrl + "page-" + currentPage + "-text").header("X-PSPDFKit-Token", pspdfkitToken).acceptJson().body();
+            FileOutputStream s;
+            try {
+                s = new FileOutputStream(file);
+            } catch (FileNotFoundException e) {
+                throw new RuntimeException(e);
+            }
+            try {
+                s.write(jsonString.getBytes());
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     public static void downloadImages(int offset, int pagesToDownload, String output, String imageTokenString, String baseURL, int qm) {
@@ -97,11 +121,13 @@ public class Main {
                     538 * qm +
                     "-" +
                     737 * qm;
-            InputStream stream = HttpRequest.get(requestUrl).header("X-PSPDFKit-Image-Token", imageTokenString).stream();
-            File file = new File(output + "page" + currentPage + ".webp");
             try {
-                ImageIO.write(ImageIO.read(stream), "webp", file);
+                InputStream stream = HttpRequest.get(requestUrl).accept("image/webp,*/*").header("X-PSPDFKit-Image-Token", imageTokenString).stream();
+                File file = new File(output + "page" + currentPage + ".webp");
+                FileOutputStream s = new FileOutputStream(file);
+                s.write(stream.readAllBytes());
             } catch (IOException e) {
+                e.printStackTrace();
                 throw new RuntimeException(e);
             }
             // convert webp to png
@@ -110,7 +136,7 @@ public class Main {
         }
     }
 
-    public static void imagesToPdf(String path, int sites, String fileName) {
+    public static void imagesToPdf(String path, int sites, String fileName, int qm, boolean withText) {
         File file0 = new File(path + "page0.png");
         com.itextpdf.text.Image image0;
         try {
@@ -121,20 +147,62 @@ public class Main {
         com.itextpdf.text.Rectangle r0 = new com.itextpdf.text.Rectangle(image0.getPlainWidth(), image0.getPlainHeight());
         Document document = new Document(r0, 0, 0, 0, 0);
         try {
-            PdfWriter.getInstance(document, new FileOutputStream(path + fileName + ".pdf"));
+            PdfWriter w = PdfWriter.getInstance(document, new FileOutputStream(path + fileName + ".pdf"));
+            w.setStrictImageSequence(true);
             document.open();
             for (int i = 0; i < sites; i++) {
                 File file = new File(path + "page" + i + ".png");
                 com.itextpdf.text.Image image = com.itextpdf.text.Image.getInstance(file.toURI().toURL());
                 com.itextpdf.text.Rectangle r = new Rectangle(image.getPlainWidth(), image.getPlainHeight());
                 document.setPageSize(r);
-                document.add(image);
+                Image img = Image.getInstance(image);
+                if (withText) {
+                    PdfContentByte cb = w.getDirectContentUnder();
+                    TextElement[] textElements = getText(path, i);
+                    for (int j = 0; j < textElements.length - 1; j++) {
+                        img = addTextOntoImage(cb, img, textElements[j].getContents(), textElements[j].getLeft(), textElements[j].getTop(), textElements[j].getHeight(), qm);
+                    }
+                }
+                document.add(img);
                 document.newPage();
             }
             document.close();
         } catch (DocumentException | IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    public static TextElement[] getText(String path, int page) {
+        TextElement[] textElements;
+        File f = new File(path + "page" + page + "text.json");
+        try {
+            String jsonString = Files.readString(f.toPath());
+            JSONObject rootObj = new JSONObject(jsonString);
+            JSONArray rootArray = rootObj.getJSONArray("textLines");
+            textElements = new TextElement[rootArray.length()];
+            for (int i = 0; i < rootArray.length(); i++) {
+                String contents = new JSONObject(rootArray.get(i).toString()).getString("contents");
+                float height = new JSONObject(rootArray.get(i).toString()).getFloat("height");
+                float left = new JSONObject(rootArray.get(i).toString()).getFloat("left");
+                float top = new JSONObject(rootArray.get(i).toString()).getFloat("top");
+                float width = new JSONObject(rootArray.get(i).toString()).getFloat("width");
+                textElements[i] = new TextElement(contents, height, left, top, width);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return textElements;
+    }
+
+    public static Image addTextOntoImage(PdfContentByte cb, Image img, String watermark, float left, float top, float height, int qm)
+            throws DocumentException {
+        float iwidth = img.getScaledWidth();
+        float iheight = img.getScaledHeight();
+        PdfTemplate template = cb.createTemplate(iwidth, iheight);
+        ColumnText.showTextAligned(template, Element.ALIGN_LEFT,
+                new Phrase(watermark, new Font(Font.FontFamily.HELVETICA, (int) (height - 3) * qm, Font.BOLD, BaseColor.BLACK)), (left) * qm, (737 - top - 7) * qm, 0);
+        template.addImage(img, iwidth, 0, 0, iheight, 0, 0);
+        return Image.getInstance(template);
     }
 
     public static void convertWebpToPng(String pathToWebp, String fileName, int currentPage) {
@@ -147,7 +215,7 @@ public class Main {
         }
     }
 
-    public static int getDownloadedSites(String path, int expectedSitesNumber) {
+    public static int getDownloadedPages(String path, int expectedSitesNumber) {
         for (int i = 0; i < expectedSitesNumber; i++) {
             File page = new File(path + "page" + i + ".png");
             if (!page.isFile() || !(page.length() > 0)) {
@@ -161,6 +229,7 @@ public class Main {
         for (int i = 0; i < sitesNumber; i++) {
             new File(path + "page" + i + ".png").delete();
             new File(path + "page" + i + ".webp").delete();
+            new File(path + "page" + i + "text.json").delete();
         }
     }
 
