@@ -152,16 +152,19 @@ public class Main {
             document.open();
             for (int i = 0; i < sites; i++) {
                 File file = new File(path + "page" + i + ".png");
-                com.itextpdf.text.Image image = com.itextpdf.text.Image.getInstance(file.toURI().toURL());
-                com.itextpdf.text.Rectangle r = new Rectangle(image.getPlainWidth(), image.getPlainHeight());
-                document.setPageSize(r);
-                Image img = Image.getInstance(image);
+                Image img = com.itextpdf.text.Image.getInstance(file.toURI().toURL());
                 if (withText) {
                     PdfContentByte cb = w.getDirectContentUnder();
                     TextElement[] textElements = getText(path, i);
+                    float iwidth = img.getScaledWidth();
+                    float iheight = img.getScaledHeight();
+                    PdfTemplate template = cb.createTemplate(iwidth, iheight);
                     for (int j = 0; j < textElements.length - 1; j++) {
-                        img = addTextOntoImage(cb, img, textElements[j].getContents(), textElements[j].getLeft(), textElements[j].getTop(), textElements[j].getHeight(), qm);
+                        ColumnText.showTextAligned(template, Element.ALIGN_LEFT, new Phrase(textElements[j].getContents(), new Font(Font.FontFamily.HELVETICA, (int) (textElements[j].getHeight() - 3) * qm, Font.BOLD, BaseColor.BLACK)), (textElements[j].getLeft()) * qm, (737 - textElements[j].getTop() - 7) * qm, 0);
                     }
+                    template.addImage(img, iwidth, 0, 0, iheight, 0, 0);
+
+                    img = Image.getInstance(template);
                 }
                 document.add(img);
                 document.newPage();
@@ -192,17 +195,6 @@ public class Main {
             throw new RuntimeException(e);
         }
         return textElements;
-    }
-
-    public static Image addTextOntoImage(PdfContentByte cb, Image img, String watermark, float left, float top, float height, int qm)
-            throws DocumentException {
-        float iwidth = img.getScaledWidth();
-        float iheight = img.getScaledHeight();
-        PdfTemplate template = cb.createTemplate(iwidth, iheight);
-        ColumnText.showTextAligned(template, Element.ALIGN_LEFT,
-                new Phrase(watermark, new Font(Font.FontFamily.HELVETICA, (int) (height - 3) * qm, Font.BOLD, BaseColor.BLACK)), (left) * qm, (737 - top - 7) * qm, 0);
-        template.addImage(img, iwidth, 0, 0, iheight, 0, 0);
-        return Image.getInstance(template);
     }
 
     public static void convertWebpToPng(String pathToWebp, String fileName, int currentPage) {
